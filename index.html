@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RideSense</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#111827; --fg:#f3f4f6; --mut:#9ca3af; --acc:#38bdf8; }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; font:14px system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  #app { display:flex; flex-direction:column; height:100%; }
+  header { display:flex; gap:8px; align-items:center; padding:8px; flex-wrap:wrap; }
+  button { background:#1f2937; color:var(--fg); border:1px solid #374151; border-radius:8px; padding:8px 12px; font:inherit; }
+  button.primary { background:var(--acc); color:#04202e; border-color:var(--acc); font-weight:600; }
+  #status { margin-left:auto; color:var(--mut); }
+  #map { flex:1; min-height:200px; }
+  #panel { max-height:36%; overflow:auto; padding:8px 10px; }
+  .stats { display:flex; gap:20px; flex-wrap:wrap; margin-bottom:6px; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--mut); font-size:12px; }
+  ul { list-style:none; margin:0; padding:0; }
+  li { padding:4px 0; border-top:1px solid #1f2937; display:flex; gap:8px; }
+  li .t { color:var(--mut); min-width:64px; }
+  .pin { width:26px; height:26px; border-radius:50%; color:#fff; font-weight:700; font-size:12px;
+         display:flex; align-items:center; justify-content:center; border:2px solid #fff; box-shadow:0 1px 4px #0008; }
+  .ph1 { background:#eab308; } .ph2 { background:#f97316; } .ph3 { background:#dc2626; }
+  .ov { background:#dc2626; border-radius:6px; width:auto; min-width:26px; padding:0 4px; }
+  .mk { background:#2563eb; }
+  label { color:var(--mut); }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <button class="primary" id="bConnect">Verbinden</button>
+    <button id="bSim">Simulation</button>
+    <button id="bExport">Export</button>
+    <button id="bClear">Leeren</button>
+    <label><input type="checkbox" id="cFollow" checked> folgen</label>
+    <span id="status">nicht verbunden</span>
+  </header>
+  <div id="map"></div>
+  <div id="panel">
+    <div class="stats">
+      <div class="stat"><b id="sSpd">–</b><span>km/h</span></div>
+      <div class="stat"><b id="sPh">0</b><span>Schlaglöcher</span></div>
+      <div class="stat"><b id="sOv">0</b><span>Überholvorgänge</span></div>
+      <div class="stat"><b id="sKm">0.0</b><span>km Strecke</span></div>
+    </div>
+    <ul id="list"></ul>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const SVC = '7a1c0001-5b1e-4f6a-9d3c-0a5e8f1b2c3d';
+const EVT = '7a1c0002-5b1e-4f6a-9d3c-0a5e8f1b2c3d';
+const TRK = '7a1c0003-5b1e-4f6a-9d3c-0a5e8f1b2c3d';
+const CLUSTER_M = 12;   // Schlaglöcher innerhalb dieses Radius zählen als dasselbe
+
+// <parse>
+function parseEvt(dv) {
+  return { type: dv.getUint8(0), val: dv.getUint8(1), flags: dv.getUint8(2),
+           lat: dv.getInt32(4, true) / 1e7, lon: dv.getInt32(8, true) / 1e7,
+           utc: dv.getUint32(12, true), spd: dv.getUint16(16, true) / 10, seq: dv.getUint16(18, true) };
+}
+function parseTrk(dv) {
+  return { lat: dv.getInt32(0, true) / 1e7, lon: dv.getInt32(4, true) / 1e7,
+           utc: dv.getUint32(8, true), spd: dv.getUint16(12, true) / 10, rough: dv.getUint16(14, true) / 1000 };
+}
+// </parse>
+
+const $ = id => document.getElementById(id);
+const state = { events: [], track: [], clusters: [], seen: new Set(), km: 0 };
+let map = null, trackLayer = null, evLayer = null, last = null;
+
+function setStatus(s) { $('status').textContent = s; }
+
+if (typeof L === 'undefined') {
+  setStatus('Karte konnte nicht geladen werden (Internet?)');
+} else {
+  map = L.map('map').setView([51.5136, 7.4653], 13);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+  trackLayer = L.layerGroup().addTo(map);
+  evLayer = L.layerGroup().addTo(map);
+}
+
+function hav(a, b, c, d) {   // Abstand in m
+  const R = 6371000, r = Math.PI / 180;
+  const x = (c - a) * r, y = (d - b) * r * Math.cos((a + c) / 2 * r);
+  return Math.sqrt(x * x + y * y) * R;
+}
+function roughColor(r) {     // Rauheit (g RMS) -> grün..rot
+  const t = Math.min(1, r / 0.5);
+  return `hsl(${120 - t * 120}, 85%, 45%)`;
+}
+function fmtTime(utc) { return utc ? new Date(utc * 1000).toLocaleTimeString() : '--:--:--'; }
+function icon(cls, txt) { return L.divIcon({ className: '', html: `<div class="pin ${cls}">${txt}</div>`, iconSize: [26, 26] }); }
+
+function onTrk(t, silent) {
+  if (!t.lat && !t.lon) return;
+  if (last) {
+    const d = hav(last.lat, last.lon, t.lat, t.lon);
+    if (d < 500) {
+      state.km += d / 1000;
+      if (trackLayer) L.polyline([[last.lat, last.lon], [t.lat, t.lon]],
+        { color: roughColor(t.rough), weight: 5, opacity: 0.9 }).addTo(trackLayer);
+    }
+  }
+  last = t;
+  state.track.push(t);
+  if (!silent) {
+    $('sSpd').textContent = t.spd.toFixed(1);
+    $('sKm').textContent = state.km.toFixed(2);
+    if (map && $('cFollow').checked) map.panTo([t.lat, t.lon]);
+  }
+}
+
+function onEvt(e, silent) {
+  const key = e.seq + '-' + e.utc;
+  if (state.seen.has(key)) return;       // Duplikate (z. B. nach Wiederverbinden)
+  state.seen.add(key);
+  if (!e.lat && !e.lon && last) { e.lat = last.lat; e.lon = last.lon; e.est = true; }  // ohne GPS: letzte bekannte Position
+  state.events.push(e);
+
+  const hasPos = e.lat || e.lon;
+  if (hasPos && evLayer) {
+    if (e.type === 0) addPothole(e);
+    else if (e.type === 1) L.marker([e.lat, e.lon], { icon: icon('ov', e.val ? e.val + ' cm' : '!') })
+      .bindPopup(`Überholvorgang${e.val ? ' – ' + e.val + ' cm' : ''}<br>${fmtTime(e.utc)} · ${e.spd.toFixed(1)} km/h`).addTo(evLayer);
+    else L.marker([e.lat, e.lon], { icon: icon('mk', 'M') }).bindPopup('Marker ' + fmtTime(e.utc)).addTo(evLayer);
+  }
+  renderStats();
+  if (!silent) renderList();
+}
+
+function addPothole(e) {
+  let c = state.clusters.find(c => hav(c.lat, c.lon, e.lat, e.lon) < CLUSTER_M);
+  if (!c) {
+    c = { lat: e.lat, lon: e.lon, n: 0, max: 0, marker: L.marker([e.lat, e.lon]).addTo(evLayer) };
+    state.clusters.push(c);
+  }
+  c.lat = (c.lat * c.n + e.lat) / (c.n + 1);
+  c.lon = (c.lon * c.n + e.lon) / (c.n + 1);
+  c.n++;
+  c.max = Math.max(c.max, e.val / 10);
+  c.marker.setLatLng([c.lat, c.lon]);
+  c.marker.setIcon(icon('ph' + (c.n >= 4 ? 3 : c.n >= 2 ? 2 : 1), c.n));
+  c.marker.bindPopup(`Schlagloch · ${c.n}× erkannt<br>stärkster Schlag ${c.max.toFixed(1)} g`);
+}
+
+function renderStats() {
+  $('sPh').textContent = state.events.filter(e => e.type === 0).length;
+  $('sOv').textContent = state.events.filter(e => e.type === 1).length;
+}
+function renderList() {
+  const names = ['Schlagloch', 'Überholen', 'Marker'];
+  $('list').innerHTML = state.events.slice(-40).reverse().map(e =>
+    `<li><span class="t">${fmtTime(e.utc)}</span><span>${names[e.type] || '?'}` +
+    (e.type === 0 ? ` ${(e.val / 10).toFixed(1)} g` : e.type === 1 && e.val ? ` ${e.val} cm` : '') +
+    ` · ${e.spd.toFixed(1)} km/h${e.est ? ' · ohne GPS' : ''}</span></li>`).join('');
+}
+
+// ---------- Bluetooth ----------
+let dev = null, retry = 0;
+async function connectBle() {
+  if (!navigator.bluetooth) { setStatus('Web Bluetooth fehlt (Chrome auf Android, HTTPS)'); return; }
+  try {
+    dev = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
+    dev.addEventListener('gattserverdisconnected', onDisc);
+    await attach();
+  } catch (e) { setStatus('Fehler: ' + e.message); }
+}
+async function attach() {
+  setStatus('verbinde ...');
+  const srv = await dev.gatt.connect();
+  const svc = await srv.getPrimaryService(SVC);
+  const ev = await svc.getCharacteristic(EVT);
+  const tr = await svc.getCharacteristic(TRK);
+  ev.addEventListener('characteristicvaluechanged', e => onEvt(parseEvt(e.target.value)));
+  tr.addEventListener('characteristicvaluechanged', e => onTrk(parseTrk(e.target.value)));
+  await tr.startNotifications();
+  await ev.startNotifications();
+  retry = 0;
+  setStatus('verbunden: ' + (dev.name || 'RideSense'));
+}
+function onDisc() {
+  setStatus('getrennt – verbinde neu ...');
+  if (retry++ < 20) setTimeout(() => attach().catch(onDisc), 3000);
+}
+
+// ---------- Simulation (Demo ohne Hardware) ----------
+let simTimer = null;
+function toggleSim() {
+  if (simTimer) { clearInterval(simTimer); simTimer = null; setStatus('Simulation aus'); return; }
+  setStatus('Simulation läuft');
+  const c = [51.5136, 7.4653], R = 0.0022, spots = [0.8, 2.4, 4.1];
+  let a = 0, seq = 0;
+  simTimer = setInterval(() => {
+    const pa = a % (2 * Math.PI);
+    a += 0.05;
+    const ca = a % (2 * Math.PI);
+    const lat = c[0] + R * Math.sin(a), lon = c[1] + R * 1.6 * Math.cos(a);
+    const utc = Math.floor(Date.now() / 1000);
+    onTrk({ lat, lon, utc, spd: 18 + Math.random() * 4, rough: 0.08 + 0.25 * Math.abs(Math.sin(a * 3)) });
+    for (const s of spots) {
+      if (pa <= s && s < ca) onEvt({ type: 0, val: 20 + Math.floor(Math.random() * 20), flags: 1,
+        lat: lat + (Math.random() - 0.5) * 6e-5, lon: lon + (Math.random() - 0.5) * 6e-5, utc, spd: 19, seq: seq++ });
+    }
+    if (Math.random() < 0.015) onEvt({ type: 1, val: 60 + Math.floor(Math.random() * 80), flags: 1, lat, lon, utc, spd: 19, seq: seq++ });
+  }, 300);
+}
+
+// ---------- Export / Speichern ----------
+function exportGeo() {
+  const feats = state.events.filter(e => e.lat || e.lon).map(e => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: [e.lon, e.lat] },
+    properties: { type: ['pothole', 'overtake', 'marker'][e.type], value: e.val, utc: e.utc, speed_kmh: e.spd } }));
+  feats.push({ type: 'Feature', properties: { type: 'track' },
+    geometry: { type: 'LineString', coordinates: state.track.map(t => [t.lon, t.lat]) } });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify({ type: 'FeatureCollection', features: feats })], { type: 'application/geo+json' }));
+  a.download = 'ridesense.geojson';
+  a.click();
+}
+function save() {
+  try { localStorage.setItem('ridesense', JSON.stringify({ events: state.events.map(e => ({ ...e, est: undefined })), track: state.track.slice(-3000) })); } catch (e) {}
+}
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem('ridesense') || 'null');
+    if (!s) return;
+    s.track.forEach(t => onTrk(t, true));
+    s.events.forEach(e => onEvt(e, true));
+    renderList();
+    if (last && map) map.setView([last.lat, last.lon], 15);
+  } catch (e) {}
+}
+function clearAll() {
+  try { localStorage.removeItem('ridesense'); } catch (e) {}
+  location.reload();
+}
+
+$('bConnect').onclick = connectBle;
+$('bSim').onclick = toggleSim;
+$('bExport').onclick = exportGeo;
+$('bClear').onclick = clearAll;
+setInterval(save, 5000);
+load();
+</script>
+</body>
+</html>
