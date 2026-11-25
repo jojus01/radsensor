@@ -34,7 +34,6 @@
 <div id="app">
   <header>
     <button class="primary" id="bConnect">Verbinden</button>
-    <button id="bSim">Simulation</button>
     <button id="bExport">Export</button>
     <button id="bClear">Leeren</button>
     <label><input type="checkbox" id="cFollow" checked> folgen</label>
@@ -166,7 +165,7 @@ function renderList() {
 // ---------- Bluetooth ----------
 let dev = null, retry = 0;
 async function connectBle() {
-  if (!navigator.bluetooth) { setStatus('Web Bluetooth fehlt (Chrome auf Android, HTTPS)'); return; }
+  if (!navigator.bluetooth) { setStatus('Web Bluetooth fehlt – auf dem iPhone Bluefy nutzen'); return; }
   try {
     dev = await navigator.bluetooth.requestDevice({ filters: [{ services: [SVC] }] });
     dev.addEventListener('gattserverdisconnected', onDisc);
@@ -191,40 +190,69 @@ function onDisc() {
   if (retry++ < 20) setTimeout(() => attach().catch(onDisc), 3000);
 }
 
-// ---------- Simulation (Demo ohne Hardware) ----------
-let simTimer = null;
-function toggleSim() {
-  if (simTimer) { clearInterval(simTimer); simTimer = null; setStatus('Simulation aus'); return; }
-  setStatus('Simulation läuft');
-  const c = [51.5136, 7.4653], R = 0.0022, spots = [0.8, 2.4, 4.1];
-  let a = 0, seq = 0;
-  simTimer = setInterval(() => {
-    const pa = a % (2 * Math.PI);
-    a += 0.05;
-    const ca = a % (2 * Math.PI);
-    const lat = c[0] + R * Math.sin(a), lon = c[1] + R * 1.6 * Math.cos(a);
-    const utc = Math.floor(Date.now() / 1000);
-    onTrk({ lat, lon, utc, spd: 18 + Math.random() * 4, rough: 0.08 + 0.25 * Math.abs(Math.sin(a * 3)) });
-    for (const s of spots) {
-      if (pa <= s && s < ca) onEvt({ type: 0, val: 20 + Math.floor(Math.random() * 20), flags: 1,
-        lat: lat + (Math.random() - 0.5) * 6e-5, lon: lon + (Math.random() - 0.5) * 6e-5, utc, spd: 19, seq: seq++ });
-    }
-    if (Math.random() < 0.015) onEvt({ type: 1, val: 60 + Math.floor(Math.random() * 80), flags: 1, lat, lon, utc, spd: 19, seq: seq++ });
-  }, 300);
+// ---------- Export / Speichern ----------
+function buildGeo() {
+  const names = ['pothole', 'overtake', 'marker'];
+  const feats = state.events.filter(e => e.lat || e.lon).map(e => ({
+    type: 'Feature', geometry: { type: 'Point', coordinates: [+e.lon.toFixed(7), +e.lat.toFixed(7)] },
+    properties: {
+      type: names[e.type] || 'unknown',
+      time: e.utc ? new Date(e.utc * 1000).toISOString() : null,
+      speed_kmh: e.spd,
+      peak_g: e.type === 0 ? e.val / 10 : undefined,          // Schlagloch: Wert in 0,1 g
+      distance_cm: e.type === 1 && e.val ? e.val : undefined,  // Überholen: Abstand in cm
+      pos_estimated: e.est || undefined } }));
+  // Track nur als Linie, wenn mindestens 2 Punkte da sind (sonst ungültiges GeoJSON)
+  const tr = state.track.filter(t => t.lat || t.lon);
+  if (tr.length >= 2) feats.push({ type: 'Feature',
+    geometry: { type: 'LineString', coordinates: tr.map(t => [+t.lon.toFixed(7), +t.lat.toFixed(7)]) },
+    properties: { type: 'track',
+      times: tr.map(t => t.utc ? new Date(t.utc * 1000).toISOString() : null),
+      speeds_kmh: tr.map(t => t.spd), roughness_g: tr.map(t => t.rough) } });
+  return JSON.stringify({ type: 'FeatureCollection', features: feats }, null, 1);
 }
 
-// ---------- Export / Speichern ----------
-function exportGeo() {
-  const feats = state.events.filter(e => e.lat || e.lon).map(e => ({
-    type: 'Feature', geometry: { type: 'Point', coordinates: [e.lon, e.lat] },
-    properties: { type: ['pothole', 'overtake', 'marker'][e.type], value: e.val, utc: e.utc, speed_kmh: e.spd } }));
-  feats.push({ type: 'Feature', properties: { type: 'track' },
-    geometry: { type: 'LineString', coordinates: state.track.map(t => [t.lon, t.lat]) } });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([JSON.stringify({ type: 'FeatureCollection', features: feats })], { type: 'application/geo+json' }));
-  a.download = 'ridesense.geojson';
-  a.click();
+async function exportGeo() {
+  if (!state.events.length && state.track.length < 2) { setStatus('Nichts zum Exportieren'); return; }
+  const txt = buildGeo();
+  const name = 'radsensor_' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.geojson';
+  // 1. Teilen-Menü (iOS/Android): Dateien, AirDrop, Mail ...
+  try {
+    const f = new File([txt], name, { type: 'application/json' });
+    if (navigator.canShare && navigator.canShare({ files: [f] })) {
+      await navigator.share({ files: [f], title: name });
+      setStatus('exportiert'); return;
+    }
+  } catch (e) { if (e.name === 'AbortError') return; }   // Nutzer hat abgebrochen
+  // 2. Klassischer Download (Desktop-Browser)
+  if (!/iPhone|iPad|iPod/.test(navigator.userAgent)) {
+    const url = URL.createObjectURL(new Blob([txt], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setStatus('exportiert: ' + name); return;
+  }
+  // 3. Rückfall: Text anzeigen zum Kopieren
+  showText(txt, name);
 }
+
+function showText(txt, name) {
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;inset:0;background:#000c;z-index:9999;display:flex;flex-direction:column;padding:12px;gap:8px';
+  d.innerHTML = `<div style="color:#fff">${name} – kopieren und z. B. in Notizen oder Dateien einfügen</div>
+    <textarea readonly style="flex:1;font:11px monospace;background:#111;color:#ddd"></textarea>
+    <div style="display:flex;gap:8px"><button class="primary">Kopieren</button><button>Schließen</button></div>`;
+  const ta = d.querySelector('textarea'); ta.value = txt;
+  const [bCopy, bClose] = d.querySelectorAll('button');
+  bCopy.onclick = async () => {
+    try { await navigator.clipboard.writeText(txt); bCopy.textContent = 'Kopiert'; }
+    catch (e) { ta.focus(); ta.select(); document.execCommand('copy'); bCopy.textContent = 'Kopiert'; }
+  };
+  bClose.onclick = () => d.remove();
+  document.body.appendChild(d);
+}
+
 function save() {
   try { localStorage.setItem('ridesense', JSON.stringify({ events: state.events.map(e => ({ ...e, est: undefined })), track: state.track.slice(-3000) })); } catch (e) {}
 }
@@ -244,7 +272,6 @@ function clearAll() {
 }
 
 $('bConnect').onclick = connectBle;
-$('bSim').onclick = toggleSim;
 $('bExport').onclick = exportGeo;
 $('bClear').onclick = clearAll;
 setInterval(save, 5000);
