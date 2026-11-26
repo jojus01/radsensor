@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RideSense Viewer</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;600;800&display=swap">
+<style>
+/* VOICE  sachlich, wie ein Fahrtenbuch mit Messwerten
+   IDEA   Karte als Hauptbild, darunter zwei Messschriebe auf gemeinsamer Zeitachse
+   PICTURE eingefaerbter Track, Ereignisse als Symbole, Fadenkreuz verbindet Karte und Diagramme
+   COLOUR blau = Tempo, orange = Rauheit (je eine Farbe hell->dunkel), Status rot/orange nur fuer Ueberholabstand
+   TYPE   Libre Franklin, Zahlen tabellarisch
+   LAYOUT Karte + Seitenleiste, Diagramme unter der Karte, unter 900px alles untereinander */
+:root{color-scheme:light dark;
+ --bg:light-dark(#f6f6f4,#141414);--panel:light-dark(#ffffff,#1d1d1d);--ink:light-dark(#191919,#efefef);
+ --mute:light-dark(#666,#9c9c9c);--line:light-dark(#e2e2e2,#333);--grid:light-dark(#ececec,#2a2a2a);
+ --s1:light-dark(#257de0,#338ced);--s2:light-dark(#f47230,#e76624);--ph:light-dark(#6a4ce2,#9887ef);
+ --crit:#dc3c3d;--serious:#f18a59;--acc:light-dark(#0d7680,#3aa7b0)}
+:root[data-theme=light]{color-scheme:light}:root[data-theme=dark]{color-scheme:dark}
+*{box-sizing:border-box;min-width:0}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 "Libre Franklin",system-ui,sans-serif;overflow-x:clip}
+header{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+h1{font-size:20px;font-weight:800;margin:0;letter-spacing:-.01em}
+header .hint{color:var(--mute);font-size:13px;flex:1 1 220px}
+button,.btn{font:inherit;font-size:14px;min-height:40px;padding:0 14px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+button:focus-visible,.btn:focus-within,input:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+.app{display:grid;grid-template-columns:minmax(0,1fr) 320px;grid-template-rows:minmax(360px,62vh) auto;height:calc(100% - 66px)}
+#map{grid-column:1;grid-row:1;background:var(--grid)}
+.side{grid-column:2;grid-row:1 / span 2;overflow:auto;border-left:1px solid var(--line);background:var(--panel);padding:14px 16px 24px}
+.charts{position:relative;grid-column:1;grid-row:2;padding:10px 16px 16px;border-top:1px solid var(--line);background:var(--panel)}
+h2{font-size:13px;font-weight:600;color:var(--mute);margin:18px 0 8px}
+h2:first-child{margin-top:0}
+.rides label,.opts label{display:flex;gap:8px;align-items:center;min-height:32px;cursor:pointer}
+.rides input,.opts input{flex:none;width:18px;height:18px}
+.rides small{color:var(--mute);margin-left:auto;white-space:nowrap}
+.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg label{flex:1;text-align:center;padding:8px 4px;cursor:pointer;font-size:14px}
+.seg input{position:absolute;opacity:0}
+.seg label:has(input:checked){background:var(--ink);color:var(--panel);font-weight:600}
+.seg label:has(input:focus-visible){outline:2px solid var(--acc);outline-offset:-2px}
+.ramp{height:10px;border-radius:5px;margin:8px 0 4px}
+.ticks{display:flex;justify-content:space-between;font-size:12px;color:var(--mute);font-variant-numeric:tabular-nums}
+.sym{display:flex;gap:8px;align-items:center;font-size:13px;margin-top:6px}
+.sym svg{flex:none}
+dl{display:grid;grid-template-columns:auto auto;gap:4px 12px;margin:0;font-size:14px}
+dt{color:var(--mute)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.chead{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:6px}
+.chead b{font-size:14px}
+.chead select{font:inherit;font-size:14px;min-height:36px;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:0 8px}
+.fig{position:relative;height:130px;margin-top:2px}
+.fig>svg{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+.cap{font-size:13px;color:var(--mute);margin:8px 0 0}
+.tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--panel);font-size:13px;padding:6px 8px;border-radius:6px;white-space:nowrap;display:none;z-index:5;font-variant-numeric:tabular-nums}
+.status{font-size:13px;color:var(--mute);margin:8px 0 0}
+.status.err{color:var(--crit)}
+.empty{position:absolute;inset:0;display:grid;place-items:center;z-index:500;pointer-events:none}
+.empty div{pointer-events:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px;max-width:360px;text-align:center;box-shadow:0 6px 24px rgba(0,0,0,.12)}
+.empty p{margin:0 0 14px;color:var(--mute)}
+#drop{position:fixed;inset:0;z-index:2000;display:none;place-items:center;background:color-mix(in srgb,var(--acc) 25%,transparent);font-size:24px;font-weight:800;color:var(--ink)}
+.leaflet-popup-content{font:14px/1.45 "Libre Franklin",system-ui,sans-serif}
+.leaflet-popup-content table{border-collapse:collapse}
+.leaflet-popup-content td{padding:1px 0}.leaflet-popup-content td+td{padding-left:12px;text-align:right;font-variant-numeric:tabular-nums}
+.leaflet-tooltip{font:13px/1.35 "Libre Franklin",system-ui,sans-serif;font-variant-numeric:tabular-nums}
+.ev-ic{background:none;border:0}
+@media(max-width:900px){
+ .app{display:flex;flex-direction:column;height:auto}
+ .charts{order:2}.side{order:3}
+ #map{height:58vh;position:relative}
+ .side{border-left:0;border-top:1px solid var(--line)}
+}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<header>
+ <h1>RideSense Viewer</h1>
+ <label class="btn pri">GeoJSON öffnen<input id="file" type="file" accept=".geojson,.json,application/json" multiple hidden></label>
+ <span class="hint">Oder Dateien auf die Seite ziehen. Mehrere Fahrten gleichzeitig möglich.</span>
+</header>
+
+<main class="app">
+ <div id="map">
+  <div class="empty" id="empty"><div>
+   <p>Exportierte <b>radsensor_….geojson</b> öffnen oder hierher ziehen.</p>
+   <button id="demo" type="button">Beispieldaten zeigen</button>
+   <p class="status" style="margin-top:10px">Die Beispieldaten sind erfunden und nur zum Ausprobieren.</p>
+  </div></div>
+ </div>
+
+ <aside class="side">
+  <h2>Fahrten</h2>
+  <div class="rides" id="rides"><span class="status">Noch keine Datei geladen.</span></div>
+  <p class="status" id="msg" role="status"></p>
+
+  <h2>Track einfärben nach</h2>
+  <div class="seg" role="radiogroup">
+   <label><input type="radio" name="mode" value="r" checked>Rauheit</label>
+   <label><input type="radio" name="mode" value="v">Tempo</label>
+   <label><input type="radio" name="mode" value="u">einfarbig</label>
+  </div>
+  <div id="legend"></div>
+
+  <h2>Lagen</h2>
+  <div class="opts">
+   <label><input type="checkbox" id="oTrack" checked>Track</label>
+   <label><input type="checkbox" id="oPh" checked>Schlaglöcher</label>
+   <label><input type="checkbox" id="oOv" checked>Überholvorgänge</label>
+   <label><input type="checkbox" id="oOvCrit">nur unter 1,5 m</label>
+   <label><input type="checkbox" id="oMk" checked>Marker (Taste)</label>
+  </div>
+  <div class="sym"><svg width="18" height="18" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6" fill="var(--ph)" stroke="#fff" stroke-width="2"/></svg>Schlagloch, Größe nach Spitze in g</div>
+  <div class="sym"><svg width="18" height="18" viewBox="0 0 18 18"><path d="M9 2 16 15H2Z" fill="var(--crit)" stroke="#fff" stroke-width="2"/></svg>Überholt unter 1,5 m</div>
+  <div class="sym"><svg width="18" height="18" viewBox="0 0 18 18"><path d="M9 2 16 15H2Z" fill="var(--serious)" stroke="#fff" stroke-width="2"/></svg>Überholt ab 1,5 m</div>
+  <div class="sym"><svg width="18" height="18" viewBox="0 0 18 18"><rect x="3" y="3" width="12" height="12" fill="var(--mute)" stroke="#fff" stroke-width="2"/></svg>Marker per Taste</div>
+
+  <h2>Kennzahlen (sichtbare Fahrten)</h2>
+  <dl id="stats"><dt>–</dt><dd></dd></dl>
+ </aside>
+
+ <section class="charts">
+  <div class="chead">
+   <b>Verlauf</b>
+   <select id="sel" aria-label="Fahrt für die Diagramme"></select>
+   <span class="status" style="margin:0">Fahre mit der Maus darüber, klicke, um die Stelle auf der Karte anzuzeigen.</span>
+  </div>
+  <div class="fig" id="fV"><svg aria-label="Geschwindigkeit über der Zeit"></svg></div>
+  <div class="fig" id="fR"><svg aria-label="Rauheit über der Zeit"></svg></div>
+  <p class="cap">Oben Tempo in km/h, unten Rauheit als Effektivwert der vertikalen Beschleunigung in g, beides pro Sekunde. Lücken = kein GPS-Fix.</p>
+  <div class="tip" id="tip"></div>
+ </section>
+</main>
+<div id="drop">Datei loslassen</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+{
+// ---- Skalen ----
+const R_MAX = 0.5;              // g, ab hier voll dunkel (wie in der App)
+const V_MAX = 40;               // km/h
+const GAP_S = 5, GAP_M = 100;   // Luecke: mehr als 5 s oder 100 m zwischen zwei Punkten
+// je eine Farbe, hell -> dunkel; hellster Schritt bleibt auf der Karte sichtbar
+const BLUE = ['#84b9f3','#6aabf1','#519ced','#338ced','#257de0','#2370cd','#1b64be','#1757ac','#0f4a96','#0e3d7e'];
+const ORNG = ['#f9b88f','#f7a676','#f6955f','#f5844a','#f47230','#e2621f','#c95416','#ac4610','#8f390b','#742e07'];
+const UNI = '#257de0';
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = x => (x == null || x === '' || !Number.isFinite(+x)) ? null : +x;
+const fmt = (x, d = 0) => x == null ? '–' : x.toLocaleString('de-DE', {minimumFractionDigits: d, maximumFractionDigits: d});
+const tm = t => t == null ? '–' : new Date(t).toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+const day = t => t == null ? '' : new Date(t).toLocaleDateString('de-DE');
+const pick = (ramp, t) => ramp[Math.round(Math.max(0, Math.min(1, t)) * (ramp.length - 1))];
+function hav(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const x = (b.lat - a.lat) * r, y = (b.lon - a.lon) * r * Math.cos((a.lat + b.lat) / 2 * r);
+  return Math.sqrt(x * x + y * y) * R;
+}
+
+// ---- Karte ----
+const map = L.map('map', {preferCanvas: true}).setView([51.5136, 7.4653], 13);
+const cv = L.canvas({tolerance: 6});
+const OSM = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>-Mitwirkende';
+const dark = matchMedia('(prefers-color-scheme: dark)').matches && document.documentElement.dataset.theme !== 'light';
+const base = {
+  'Hell (CARTO)': L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {maxZoom: 20, attribution: OSM + ' &copy; CARTO'}),
+  'Dunkel (CARTO)': L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {maxZoom: 20, attribution: OSM + ' &copy; CARTO'}),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: OSM}),
+  'Luftbild (Esri)': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {maxZoom: 19, attribution: 'Tiles &copy; Esri, Maxar, Earthstar Geographics'}),
+};
+(dark ? base['Dunkel (CARTO)'] : base['Hell (CARTO)']).addTo(map);
+L.control.layers(base, null, {position: 'topright'}).addTo(map);
+L.control.scale({imperial: false}).addTo(map);
+const hover = L.circleMarker([0, 0], {renderer: cv, radius: 8, color: '#fff', weight: 3, fillColor: '#191919', fillOpacity: 1, interactive: false});
+
+// ---- Zustand ----
+const rides = [];
+let mode = 'r', cur = null;
+
+// ---- Einlesen ----
+function parse(name, gj) {
+  if (!gj || gj.type !== 'FeatureCollection' || !Array.isArray(gj.features))
+    throw new Error('keine GeoJSON-FeatureCollection');
+  const r = {name, tr: [], ev: [], on: true};
+  for (const f of gj.features) {
+    const p = f.properties || {}, g = f.geometry || {};
+    if (g.type === 'LineString') {
+      const c = g.coordinates || [];
+      c.forEach((xy, i) => r.tr.push({
+        lon: +xy[0], lat: +xy[1], brk: i === 0 && r.tr.length > 0,
+        t: p.times && p.times[i] ? Date.parse(p.times[i]) : null,
+        v: num(p.speeds_kmh && p.speeds_kmh[i]), r: num(p.roughness_g && p.roughness_g[i])}));
+    } else if (g.type === 'Point' && Array.isArray(g.coordinates)) {
+      r.ev.push({kind: String(p.type || 'unknown'), lon: +g.coordinates[0], lat: +g.coordinates[1],
+        t: p.time ? Date.parse(p.time) : null, v: num(p.speed_kmh), peak: num(p.peak_g),
+        dist: num(p.distance_cm), est: !!p.pos_estimated});
+    }
+  }
+  if (!r.tr.length && !r.ev.length) throw new Error('weder Track noch Ereignisse gefunden');
+  // Luecken markieren: kein GPS-Fix, Zeit- oder Ortssprung
+  r.tr.forEach((b, i) => {
+    if (!i) { b.brk = true; return; }
+    const a = r.tr[i - 1];
+    if ((a.t != null && b.t != null && (b.t - a.t) / 1000 > GAP_S) || hav(a, b) > GAP_M) b.brk = true;
+  });
+  r.stats = stats(r);
+  return r;
+}
+
+function stats(r) {
+  let dist = 0;
+  r.tr.forEach((b, i) => { if (i && !b.brk) dist += hav(r.tr[i - 1], b); });
+  const ts = r.tr.map(p => p.t).filter(t => t != null);
+  const vs = r.tr.map(p => p.v).filter(v => v != null);
+  const rs = r.tr.map(p => p.r).filter(v => v != null).sort((a, b) => a - b);
+  const ov = r.ev.filter(e => e.kind === 'overtake');
+  const ovd = ov.map(e => e.dist).filter(d => d != null);
+  return {
+    dist, t0: ts.length ? ts[0] : null, t1: ts.length ? ts[ts.length - 1] : null,
+    vMov: vs.filter(v => v > 2),
+    vMax: vs.length ? Math.max(...vs) : null,
+    rAvg: rs.length ? rs.reduce((s, v) => s + v, 0) / rs.length : null,
+    rs,
+    nPh: r.ev.filter(e => e.kind === 'pothole').length,
+    nOv: ov.length, nCrit: ovd.filter(d => d < 150).length,
+    dMin: ovd.length ? Math.min(...ovd) : null,
+    nMk: r.ev.filter(e => e.kind === 'marker').length,
+  };
+}
+
+// ---- Zeichnen ----
+function segColor(a, b) {
+  if (mode === 'u') return UNI;
+  if (mode === 'r') return b.r == null ? '#999' : pick(ORNG, b.r / R_MAX);
+  const v = a.v != null && b.v != null ? (a.v + b.v) / 2 : (b.v ?? a.v);
+  return v == null ? '#999' : pick(BLUE, v / V_MAX);
+}
+function tipFor(p) {
+  return `${p.t != null ? tm(p.t) + '<br>' : ''}Tempo ${fmt(p.v, 1)} km/h<br>Rauheit ${fmt(p.r, 2)} g`;
+}
+function drawTrack(r) {
+  r.lt.clearLayers();
+  r.tr.forEach((b, i) => {
+    if (b.brk) return;
+    const a = r.tr[i - 1];
+    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {renderer: cv, color: segColor(a, b), weight: 5, opacity: .95, lineCap: 'round'})
+      .bindTooltip(() => tipFor(b), {sticky: true})
+      .on('mouseover', () => { if (r === cur) cross(i); })
+      .on('mouseout', () => { if (r === cur) uncross(); })
+      .addTo(r.lt);
+  });
+}
+function icon(kind, e) {
+  let svg;
+  if (kind === 'pothole') {
+    const s = Math.round(12 + Math.min(1, (e.peak || 0) / 4) * 10);
+    svg = `<svg width="${s}" height="${s}" viewBox="0 0 20 20"><circle cx="10" cy="10" r="8" fill="var(--ph)" stroke="#fff" stroke-width="2.5"/></svg>`;
+    return L.divIcon({className: 'ev-ic', html: svg, iconSize: [s, s]});
+  }
+  if (kind === 'overtake') {
+    const c = e.dist == null ? 'var(--mute)' : e.dist < 150 ? 'var(--crit)' : 'var(--serious)';
+    svg = `<svg width="22" height="22" viewBox="0 0 22 22"><path d="M11 2 20 19H2Z" fill="${c}" stroke="#fff" stroke-width="2.5" stroke-linejoin="round"/></svg>`;
+    return L.divIcon({className: 'ev-ic', html: svg, iconSize: [22, 22]});
+  }
+  svg = '<svg width="16" height="16" viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" fill="var(--mute)" stroke="#fff" stroke-width="2.5"/></svg>';
+  return L.divIcon({className: 'ev-ic', html: svg, iconSize: [16, 16]});
+}
+function popup(r, e) {
+  const name = {pothole: 'Schlagloch', overtake: 'Überholvorgang', marker: 'Marker'}[e.kind] || esc(e.kind);
+  const rows = [['Fahrt', esc(r.name)], ['Zeit', e.t != null ? day(e.t) + ' ' + tm(e.t) : '–'], ['Tempo', fmt(e.v, 1) + ' km/h']];
+  if (e.kind === 'pothole') rows.push(['Spitze', fmt(e.peak, 1) + ' g']);
+  if (e.kind === 'overtake') rows.push(['Abstand', e.dist == null ? 'nicht übertragen' : fmt(e.dist) + ' cm' + (e.dist < 150 ? ' · unter 1,5 m' : '')]);
+  if (e.est) rows.push(['Position', 'geschätzt (kein Fix)']);
+  return `<b>${name}</b><table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>`;
+}
+function drawEvents(r) {
+  r.lph.clearLayers(); r.lov.clearLayers(); r.lmk.clearLayers();
+  const crit = $('oOvCrit').checked;
+  for (const e of r.ev) {
+    if (!Number.isFinite(e.lat) || !Number.isFinite(e.lon) || (!e.lat && !e.lon)) continue;
+    const g = e.kind === 'pothole' ? r.lph : e.kind === 'overtake' ? r.lov : r.lmk;
+    if (e.kind === 'overtake' && crit && !(e.dist != null && e.dist < 150)) continue;
+    L.marker([e.lat, e.lon], {icon: icon(e.kind, e), keyboard: true, zIndexOffset: e.kind === 'overtake' ? 500 : 0})
+      .bindPopup(() => popup(r, e)).addTo(g);
+  }
+}
+function sync() {
+  for (const r of rides) {
+    const want = [[r.lt, $('oTrack').checked], [r.lph, $('oPh').checked], [r.lov, $('oOv').checked], [r.lmk, $('oMk').checked]];
+    for (const [l, on] of want) (r.on && on) ? l.addTo(map) : l.remove();
+  }
+  showStats(); legend();
+}
+
+// ---- Seitenleiste ----
+function legend() {
+  if (mode === 'u') { $('legend').innerHTML = ''; return; }
+  const [ramp, ticks] = mode === 'r'
+    ? [ORNG, ['0 g', '0,25 g', '≥ 0,5 g']] : [BLUE, ['0 km/h', '20 km/h', '≥ 40 km/h']];
+  $('legend').innerHTML = `<div class="ramp" style="background:linear-gradient(90deg,${ramp.join(',')})"></div>
+    <div class="ticks">${ticks.map(t => `<span>${t}</span>`).join('')}</div>
+    <div class="ticks"><span>${mode === 'r' ? 'glatt' : 'langsam'}</span><span>${mode === 'r' ? 'holprig' : 'schnell'}</span></div>`;
+}
+function showStats() {
+  const on = rides.filter(r => r.on);
+  if (!on.length) { $('stats').innerHTML = '<dt>–</dt><dd></dd>'; return; }
+  const s = on.map(r => r.stats), sum = k => s.reduce((a, x) => a + x[k], 0);
+  const w = s.reduce((a, x) => a + (x.rAvg != null ? x.dist : 0), 0);
+  const rAvg = w ? s.reduce((a, x) => a + (x.rAvg != null ? x.rAvg * x.dist : 0), 0) / w : null;
+  const dMins = s.map(x => x.dMin).filter(d => d != null);
+  const vm = s.flatMap(x => x.vMov), ra = s.flatMap(x => x.rs).sort((a, b) => a - b);
+  const dur = s.reduce((a, x) => a + (x.t0 != null ? (x.t1 - x.t0) / 60000 : 0), 0);
+  const rows = [
+    ['Strecke', fmt(sum('dist') / 1000, 2) + ' km'], ['Dauer', fmt(dur) + ' min'],
+    ['Ø Tempo (fahrend)', fmt(vm.length ? vm.reduce((a, v) => a + v, 0) / vm.length : null, 1) + ' km/h'],
+    ['max. Tempo', fmt(Math.max(...s.map(x => x.vMax ?? 0)), 1) + ' km/h'],
+    ['Ø Rauheit', fmt(rAvg, 2) + ' g'], ['Rauheit, 90 %-Wert', fmt(ra.length ? ra[Math.floor(ra.length * 0.9)] : null, 2) + ' g'],
+    ['Schlaglöcher', fmt(sum('nPh'))], ['Überholvorgänge', fmt(sum('nOv'))],
+    ['davon unter 1,5 m', fmt(sum('nCrit'))], ['engster Abstand', dMins.length ? fmt(Math.min(...dMins)) + ' cm' : '–'],
+    ['Marker', fmt(sum('nMk'))]];
+  $('stats').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+function listRides() {
+  $('rides').innerHTML = rides.map((r, i) => `<label><input type="checkbox" data-i="${i}" ${r.on ? 'checked' : ''}>
+    <span>${esc(r.name)}</span><small>${fmt(r.stats.dist / 1000, 1)} km</small></label>`).join('');
+  $('sel').innerHTML = rides.map((r, i) => `<option value="${i}">${esc(r.name)}</option>`).join('');
+  $('sel').value = String(rides.indexOf(cur));
+}
+
+// ---- Diagramme: Tempo und Rauheit untereinander, gemeinsame Zeitachse ----
+const figs = [
+  {el: $('fV'), key: 'v', col: 'var(--s1)', max: () => Math.max(20, Math.ceil(Math.max(...cur.tr.map(p => p.v ?? 0)) / 10) * 10), unit: 'km/h', d: 0},
+  {el: $('fR'), key: 'r', col: 'var(--s2)', max: () => Math.max(R_MAX, Math.ceil(Math.max(...cur.tr.map(p => p.r ?? 0)) * 2) / 2), unit: 'g', d: 2},
+];
+const M = {l: 46, r: 12, t: 8, b: 20};
+let xs = [], X = null;
+function drawCharts() {
+  for (const f of figs) {
+    const svg = f.el.querySelector('svg'), W = svg.clientWidth, H = svg.clientHeight;
+    if (!cur || !cur.tr.length || !W) { svg.innerHTML = ''; continue; }
+    const isT = cur.tr.every(q => q.t != null);
+    xs = cur.tr.map((p, i) => isT ? p.t : i);
+    const x0 = xs[0], x1 = xs[xs.length - 1] || x0 + 1, ymax = f.max();
+    X = v => M.l + (v - x0) / (x1 - x0 || 1) * (W - M.l - M.r);
+    const Y = v => H - M.b - v / ymax * (H - M.t - M.b);
+    let d = '', pen = false;
+    cur.tr.forEach((p, i) => {
+      if (p[f.key] == null || p.brk) pen = false;
+      if (p[f.key] == null) return;
+      d += (pen ? 'L' : 'M') + X(xs[i]).toFixed(1) + ' ' + Y(p[f.key]).toFixed(1);
+      pen = true;
+    });
+    const gy = [0, ymax / 2, ymax].map(v => `<line x1="${M.l}" x2="${W - M.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--grid)"/>
+      <text x="${M.l - 6}" y="${Y(v) + 4}" text-anchor="end" font-size="12" fill="var(--mute)">${fmt(v, f.d)}</text>`).join('');
+    const nT = W < 520 ? 2 : 5;
+    const gx = f === figs[1] ? Array.from({length: nT}, (_, k) => {
+      const v = x0 + (x1 - x0) * k / (nT - 1);
+      const lbl = isT ? new Date(v).toLocaleTimeString('de-DE', {hour: '2-digit', minute: '2-digit'}) : 'Pkt ' + Math.round(v);
+      return `<text x="${X(v)}" y="${H - 4}" text-anchor="${k === 0 ? 'start' : k === nT - 1 ? 'end' : 'middle'}" font-size="12" fill="var(--mute)">${lbl}</text>`;
+    }).join('') : '';
+    svg.innerHTML = `${gy}${gx}<text x="${M.l + 6}" y="${M.t + 12}" font-size="12" font-weight="600" fill="var(--ink)">${f.key === 'v' ? 'Tempo, km/h' : 'Rauheit, g'}</text>
+      <path d="${d}" fill="none" stroke="${f.col}" stroke-width="2" stroke-linejoin="round"/>
+      <g class="cx" style="display:none"><line y1="${M.t}" y2="${H - M.b}" stroke="var(--ink)" stroke-opacity=".5"/><circle r="4.5" fill="${f.col}" stroke="var(--panel)" stroke-width="2"/></g>
+      <rect x="${M.l}" y="0" width="${Math.max(0, W - M.l - M.r)}" height="${H}" fill="transparent"/>`;
+    f.Y = Y;
+  }
+}
+function nearest(px) {
+  let lo = 0, hi = xs.length - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; (X(xs[m]) < px ? lo = m : hi = m); }
+  return Math.abs(X(xs[lo]) - px) <= Math.abs(X(xs[hi]) - px) ? lo : hi;
+}
+function cross(i) {
+  if (!cur || !X) return;
+  const p = cur.tr[i];
+  for (const f of figs) {
+    const g = f.el.querySelector('.cx'); if (!g) continue;
+    const x = X(xs[i]), v = p[f.key];
+    g.style.display = '';
+    g.querySelector('line').setAttribute('x1', x); g.querySelector('line').setAttribute('x2', x);
+    const c = g.querySelector('circle');
+    c.style.display = v == null ? 'none' : ''; c.setAttribute('cx', x); if (v != null) c.setAttribute('cy', f.Y(v));
+  }
+  const tip = $('tip'), box = figs[0].el.getBoundingClientRect(), host = $('tip').parentElement.getBoundingClientRect();
+  tip.innerHTML = tipFor(p); tip.style.display = 'block';
+  const x = box.left - host.left + X(xs[i]);
+  tip.style.left = Math.min(x + 12, host.width - tip.offsetWidth - 8) + 'px';
+  tip.style.top = (box.top - host.top + 4) + 'px';
+  hover.setLatLng([p.lat, p.lon]).addTo(map);
+}
+function uncross() {
+  for (const f of figs) { const g = f.el.querySelector('.cx'); if (g) g.style.display = 'none'; }
+  $('tip').style.display = 'none'; hover.remove();
+}
+for (const f of figs) {
+  const svg = f.el.querySelector('svg');
+  svg.addEventListener('pointermove', e => { if (cur && xs.length) cross(nearest(e.clientX - svg.getBoundingClientRect().left)); });
+  svg.addEventListener('pointerleave', uncross);
+  svg.addEventListener('click', e => {
+    if (!cur || !xs.length) return;
+    const p = cur.tr[nearest(e.clientX - svg.getBoundingClientRect().left)];
+    map.setView([p.lat, p.lon], Math.max(map.getZoom(), 16));
+  });
+  new ResizeObserver(drawCharts).observe(svg);
+}
+
+// ---- Laden ----
+function add(r) {
+  r.lt = L.layerGroup(); r.lph = L.layerGroup(); r.lov = L.layerGroup(); r.lmk = L.layerGroup();
+  rides.push(r); cur = r;
+  drawTrack(r); drawEvents(r);
+  $('empty').style.display = 'none';
+  listRides(); sync(); drawCharts();
+  const pts = r.tr.map(p => [p.lat, p.lon]).concat(r.ev.filter(e => e.lat || e.lon).map(e => [e.lat, e.lon]));
+  if (pts.length) map.fitBounds(pts, {padding: [30, 30], maxZoom: 17});
+}
+function msg(t, err) { $('msg').textContent = t; $('msg').className = 'status' + (err ? ' err' : ''); }
+async function load(files) {
+  let ok = 0;
+  for (const f of files) {
+    try { add(parse(f.name, JSON.parse(await f.text()))); ok++; }
+    catch (e) { msg(`${f.name}: ${e.message}`, true); return; }
+  }
+  if (ok) msg(`${ok} Datei${ok > 1 ? 'en' : ''} geladen.`);
+}
+$('file').addEventListener('change', e => { load([...e.target.files]); e.target.value = ''; });
+let dragN = 0;
+addEventListener('dragenter', e => { e.preventDefault(); dragN++; $('drop').style.display = 'grid'; });
+addEventListener('dragleave', () => { if (--dragN <= 0) { dragN = 0; $('drop').style.display = 'none'; } });
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); dragN = 0; $('drop').style.display = 'none'; load([...e.dataTransfer.files]); });
+
+document.querySelectorAll('input[name=mode]').forEach(el => el.addEventListener('change', () => {
+  mode = el.value; rides.forEach(drawTrack); legend();
+}));
+['oTrack', 'oPh', 'oOv', 'oMk'].forEach(id => $(id).addEventListener('change', sync));
+$('oOvCrit').addEventListener('change', () => { rides.forEach(drawEvents); sync(); });
+$('rides').addEventListener('change', e => {
+  const i = +e.target.dataset.i; if (!rides[i]) return;
+  rides[i].on = e.target.checked; sync();
+});
+$('sel').addEventListener('change', e => { cur = rides[+e.target.value]; uncross(); drawCharts(); });
+
+// ---- Erfundene Beispielfahrt (nur zum Ausprobieren) ----
+$('demo').addEventListener('click', () => {
+  let s = 7; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+  const t0 = Date.UTC(2026, 10, 25, 15, 0, 0), co = [], ti = [], sp = [], ro = [], fe = [];
+  let lat = 51.5136, lon = 7.4653, hd = 0.6, v = 0;
+  for (let i = 0; i < 900; i++) {
+    if (i > 420 && i < 435) { ti.push(null); continue; }            // Tunnel: kein Fix
+    v += (18 + 6 * Math.sin(i / 70) - v) * 0.15 + (rnd() - .5) * 2; v = Math.max(0, v);
+    hd += (rnd() - .5) * 0.12 + (i % 200 === 0 ? 1.2 : 0);
+    lat += Math.cos(hd) * v / 3.6 / 111320; lon += Math.sin(hd) * v / 3.6 / (111320 * Math.cos(lat * Math.PI / 180));
+    const cobble = i > 520 && i < 640;
+    co.push([+lon.toFixed(7), +lat.toFixed(7)]); ti.push(new Date(t0 + i * 1000).toISOString());
+    sp.push(+v.toFixed(1)); ro.push(+((cobble ? .32 : .08) + rnd() * (cobble ? .2 : .07)).toFixed(3));
+    if (rnd() < .006) fe.push({type: 'Feature', geometry: {type: 'Point', coordinates: [lon, lat]},
+      properties: {type: 'pothole', time: ti[ti.length - 1], speed_kmh: +v.toFixed(1), peak_g: +(2 + rnd() * 2.5).toFixed(1)}});
+    if (rnd() < .008) fe.push({type: 'Feature', geometry: {type: 'Point', coordinates: [lon, lat]},
+      properties: {type: 'overtake', time: ti[ti.length - 1], speed_kmh: +v.toFixed(1), distance_cm: Math.round(70 + rnd() * 160)}});
+  }
+  const tt = ti.filter(t => t);
+  fe.push({type: 'Feature', geometry: {type: 'LineString', coordinates: co},
+    properties: {type: 'track', times: tt, speeds_kmh: sp, roughness_g: ro}});
+  add(parse('Beispiel (erfunden)', {type: 'FeatureCollection', features: fe}));
+  msg('Beispieldaten geladen. Sie sind erfunden.');
+});
+legend();
+}
+</script>
+</body>
+</html>
