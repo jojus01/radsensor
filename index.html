@@ -12,6 +12,7 @@
   #app { display:flex; flex-direction:column; height:100%; }
   header { display:flex; gap:8px; align-items:center; padding:8px; flex-wrap:wrap; }
   button { background:#1f2937; color:var(--fg); border:1px solid #374151; border-radius:8px; padding:8px 12px; font:inherit; }
+  a.btn { background:#1f2937; color:var(--fg); border:1px solid #374151; border-radius:8px; padding:8px 12px; font:inherit; text-decoration:none; }
   button.primary { background:var(--acc); color:#04202e; border-color:var(--acc); font-weight:600; }
   #status { margin-left:auto; color:var(--mut); }
   #map { flex:1; min-height:200px; }
@@ -35,6 +36,7 @@
   <header>
     <button class="primary" id="bConnect">Verbinden</button>
     <button id="bExport">Export</button>
+    <a class="btn" href="ridesense-viewer.html" target="_blank" rel="noopener">Auswerten</a>
     <button id="bClear">Leeren</button>
     <label><input type="checkbox" id="cFollow" checked> folgen</label>
     <span id="status">nicht verbunden</span>
